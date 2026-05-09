@@ -18,7 +18,7 @@ trade_review_system/
     └── signals.csv  (首次记录时自动创建)
 ```
 
-## 1) 记录信号
+## 1) 记录信号（record_signal.py）
 
 进入项目目录后运行：
 
@@ -41,7 +41,7 @@ python record_signal.py
 - 若 `data/` 不存在则创建
 - 若 `data/signals.csv` 不存在则创建并写入表头
 
-## 2) 查看最近 20 条信号
+## 2) 查看最近 20 条信号（list_signals.py）
 
 ```bash
 python list_signals.py
@@ -49,8 +49,7 @@ python list_signals.py
 
 会打印最近 20 条（不足 20 条则全部打印）。
 
-
-## 3) 分析信号的风险与目标价
+## 3) 分析信号的风险与目标价（analyze_result.py）
 
 ```bash
 python analyze_result.py
@@ -63,5 +62,5 @@ python analyze_result.py
 - 2R 目标价
 - 3R 目标价
 
-如果没有记录文件，会提示：`还没有信号记录，请先运行 record_signal.py`。
+如果没有记录文件，会提示：`还没有信号记录，请先运行 record_signal.py`。  
 如果 CSV 没有数据行，会提示：`暂无可分析的信号`。
