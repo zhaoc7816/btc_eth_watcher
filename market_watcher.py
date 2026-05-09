@@ -892,14 +892,211 @@ def should_push_to_dingtalk(model):
     return model["status"] == "ALLOW"
 
 
+
+# ==============================
+# V8.2-P0 Override Start
+# Price/OI/VOL/VWAP 四确认 + MA20 连续确认硬过滤
+# ==============================
+
+def get_price_confirm_v82(direction, last, prev):
+    close = float(last["close"])
+    prev_close = float(prev["close"])
+    ma20 = float(last.get("ma20", close))
+    vwap = float(last.get("vwap", close))
+
+    if direction == "LONG":
+        if close > prev_close:
+            return True, f"Price：多头价格确认，本根收盘 {close:.2f} > 上根收盘 {prev_close:.2f}"
+        if close >= ma20 and close >= vwap:
+            return True, f"Price：多头位置确认，价格 {close:.2f} 同时站在 MA20 / VWAP 上方"
+        return False, f"Price：多头价格未确认，本根 {close:.2f} 未强于上根 {prev_close:.2f}"
+
+    if direction == "SHORT":
+        if close < prev_close:
+            return True, f"Price：空头价格确认，本根收盘 {close:.2f} < 上根收盘 {prev_close:.2f}"
+        if close <= ma20 and close <= vwap:
+            return True, f"Price：空头位置确认，价格 {close:.2f} 同时在 MA20 / VWAP 下方"
+        return False, f"Price：空头价格未确认，本根 {close:.2f} 未弱于上根 {prev_close:.2f}"
+
+    return False, "Price：无方向，不做价格确认"
+
+
+def get_volume_confirm_v82(direction, last, prev):
+    vol_now = float(last.get("volume", 0))
+    vol_prev = float(prev.get("volume", 0))
+
+    if vol_prev <= 0:
+        return True, "VOL：上一根成交量无有效数据，本轮不强过滤"
+
+    ratio = vol_now / vol_prev
+
+    if ratio >= 0.80:
+        return True, f"VOL：成交量确认，当前/上根={ratio:.2f}，未明显缩量"
+
+    return False, f"VOL：成交量不足，当前/上根={ratio:.2f}，信号质量下降"
+
+
+def get_vwap_confirm_v82(direction, last):
+    close = float(last["close"])
+    vwap = last.get("vwap", None)
+
+    if vwap is None:
+        return False, "VWAP：无 VWAP 数据，不能通过四确认"
+
+    vwap = float(vwap)
+
+    if direction == "LONG":
+        if close >= vwap:
+            return True, f"VWAP：多头站位合理，价格 {close:.2f} 在 VWAP {vwap:.2f} 上方"
+        return False, f"VWAP：多头未确认，价格 {close:.2f} 在 VWAP {vwap:.2f} 下方"
+
+    if direction == "SHORT":
+        if close <= vwap:
+            return True, f"VWAP：空头站位合理，价格 {close:.2f} 在 VWAP {vwap:.2f} 下方"
+        return False, f"VWAP：空头未确认，价格 {close:.2f} 在 VWAP {vwap:.2f} 上方"
+
+    return False, "VWAP：无方向，不做 VWAP 确认"
+
+
+def get_oi_confirm_v82(symbol, direction, last, prev):
+    """
+    使用原有 get_oi_confirm() 做兼容。
+    注意：OKX OI 历史经常不可用。
+    V8.2-P0 采用稳定折中：
+    - OI 完全获取失败：不通过
+    - 只有“历史对比暂不可用，但当前值可用”：不强杀
+    """
+    try:
+        old_func = globals().get("get_oi_confirm")
+        if old_func is None:
+            return True, "OI：未找到原 OI 函数，本轮不强过滤"
+
+        txt = old_func(symbol, direction, last, prev)
+        if txt is None:
+            return False, "OI：获取失败，返回为空"
+
+        # 兼容旧函数返回 dict 的情况
+        if isinstance(txt, dict):
+            state = txt.get("state", "UNKNOWN")
+            msg = txt.get("text", "")
+            txt = f"{state}：{msg}"
+        else:
+            txt = str(txt)
+
+        hard_bad_words = ["获取失败", "失败", "ERROR", "error", "None"]
+        if any(w in txt for w in hard_bad_words):
+            return False, "OI：" + txt
+
+        # 这类属于接口历史不稳定，不强杀，否则系统可能长期没有 ALLOW
+        soft_unknown_words = ["历史对比暂不可用", "本轮不强过滤", "暂不可用"]
+        if any(w in txt for w in soft_unknown_words):
+            return True, "OI：" + txt
+
+        # 明确不支持当前方向则失败
+        negative_words = ["背离", "不支持", "下降且", "减少且"]
+        if any(w in txt for w in negative_words):
+            return False, "OI：" + txt
+
+        return True, "OI：" + txt
+
+    except Exception as e:
+        return False, f"OI：确认异常 {e}"
+
+
+def apply_flow_filter(symbol, model, df):
+    """
+    V8.2-P0：
+    Price / OI / VOL / VWAP 四确认。
+    对 ALLOW 做硬过滤；非 ALLOW 只展示。
+    """
+    last = df.iloc[-2]
+    prev = df.iloc[-3]
+
+    direction = model.get("direction", "WAIT")
+    status = model.get("status", "WATCH")
+
+    price_ok, price_text = get_price_confirm_v82(direction, last, prev)
+    oi_ok, oi_text = get_oi_confirm_v82(symbol, direction, last, prev)
+    vol_ok, vol_text = get_volume_confirm_v82(direction, last, prev)
+    vwap_ok, vwap_text = get_vwap_confirm_v82(direction, last)
+
+    model["flow_filter"] = "\n".join([
+        price_text,
+        oi_text,
+        vol_text,
+        vwap_text
+    ])
+
+    all_ok = price_ok and oi_ok and vol_ok and vwap_ok
+    model["flow_confirm_ok"] = all_ok
+
+    if status == "ALLOW" and not all_ok:
+        failed = []
+        if not price_ok:
+            failed.append("Price")
+        if not oi_ok:
+            failed.append("OI")
+        if not vol_ok:
+            failed.append("VOL")
+        if not vwap_ok:
+            failed.append("VWAP")
+
+        model["status"] = "WATCH"
+        model["status_text"] = "👀【观察接近】"
+        model["trigger"] = model.get("trigger", "") + "；但资金四确认未全部通过：" + "/".join(failed)
+        model["allow_action"] = "等待 Price/OI/VOL/VWAP 四确认全部通过后再出手"
+        model["risk"] = "资金四确认不完整，禁止强推 ALLOW"
+
+    return model
+
+
+def apply_ma20_zone_filter(symbol, model, df):
+    """
+    V8.2-P0：
+    MA20 连续确认硬过滤。
+    LONG 只有 CONFIRMED_ABOVE 才能继续 ALLOW。
+    SHORT 只有 CONFIRMED_BELOW 才能继续 ALLOW。
+    其他状态全部降级 WATCH。
+    """
+    ma20_state = detect_ma20_zone_state(df)
+    state = ma20_state.get("state", "UNKNOWN")
+    text = ma20_state.get("text", "MA20 状态不明确")
+
+    model["ma20_zone_filter"] = text
+
+    direction = model.get("direction", "WAIT")
+    status = model.get("status", "WATCH")
+
+    if status != "ALLOW":
+        return model
+
+    if direction == "LONG" and state == "CONFIRMED_ABOVE":
+        return model
+
+    if direction == "SHORT" and state == "CONFIRMED_BELOW":
+        return model
+
+    model["status"] = "WATCH"
+    model["status_text"] = "👀【观察接近】"
+    model["trigger"] = model.get("trigger", "") + f"；但 MA20 未形成连续确认，当前状态：{state}"
+    model["allow_action"] = "等待 MA20 连续2根15m确认后再出手"
+    model["risk"] = "MA20 未连续确认，容易假突破/假跌破"
+    return model
+
+# ==============================
+# V8.2-P0 Override End
+# ==============================
+
+
+
 def main():
     load_env()
 
     print()
-    print("BTC/ETH 看盘引擎 V8.1 启动")
+    print("BTC/ETH 看盘引擎 V8.2-P0 启动")
     print(f"北京时间：{now_beijing()}")
-    print("规则：15m 找入场，MA20区域确认，BTC领航，1H/4H过滤，资金四确认，并输出执行单")
-    print("推送规则：只有 ✅【允许出手】 且通过 BTC领航 + 1H/4H + 资金三确认，才推送钉钉")
+    print("规则：15m 找入场，MA20连续确认，BTC领航，1H/4H过滤，Price/OI/VOL/VWAP四确认，并输出执行单")
+    print("推送规则：只有 ✅【允许出手】 且通过 BTC领航 + 1H/4H + Price/OI/VOL/VWAP 四确认，才推送钉钉")
 
     market_results = {}
     push_queue = []
